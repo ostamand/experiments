@@ -13,8 +13,10 @@ from dotenv import load_dotenv
 import pandas as pd
 from tqdm import tqdm
 from diffusers import DDPMScheduler, UNet2DModel
+import wandb
 
 load_dotenv()
+
 
 class BirdDataset(Dataset):
     """Combines train, test & valid data together, ignores labels for now"""
@@ -63,6 +65,7 @@ class BirdDataset(Dataset):
         image = self.transforms(image)
         return image
 
+
 def build_model(image_size: int = 64):
     return UNet2DModel(
         sample_size=image_size,
@@ -84,21 +87,22 @@ def build_model(image_size: int = 64):
         ),
     )
 
+
 def fit(
-        model: UNet2DModel,
-        dataset: Dataset,
-        noise_scheduler: DDPMScheduler,
-        epochs: int = 1,
-        batch_size: int = 64,
-        num_train_timesteps: int = 1000,
-        lr=4e-4,
-        batch_pg=True
-    ):
+    model: UNet2DModel,
+    dataset: Dataset,
+    noise_scheduler: DDPMScheduler,
+    epochs: int = 1,
+    batch_size: int = 64,
+    num_train_timesteps: int = 1000,
+    lr=4e-4,
+    batch_pg=True,
+):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model.to(device)
 
     dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=True)
-    log_each_batch = max(len(dataloader) // 5 , 1)
+    log_each_batch = max(len(dataloader) // 5, 1)
 
     opt = torch.optim.AdamW(model.parameters(), lr=lr)
     lossf = torch.nn.MSELoss()
@@ -128,48 +132,64 @@ def fit(
             if batch_pg and (batch_i + 1) % log_each_batch == 0:
                 print(f"status: epoch {epoch+1}, batch {batch_i+1}/{len(dataloader)}")
 
-        loss_avg = sum(losses[-len(dataloader):]) / len(dataloader)
+        loss_avg = sum(losses[-len(dataloader) :]) / len(dataloader)
         print(f"done: epoch {epoch+1}, loss {loss_avg}")
+        wandb.log({"loss": loss_avg})
 
     return losses
 
-def save_outs(out_dir: Path, args: dict[str, any], model: UNet2DModel, train_losses: list):
-    out = {
-        "args": args,
-        "train_losses": train_losses
-    }
+
+def save_outs(
+    out_dir: Path, args: dict[str, any], model: UNet2DModel, train_losses: list
+):
+    out = {"args": args, "train_losses": train_losses}
     if not out_dir.exists():
         os.makedirs(out_dir)
     torch.save(model.state_dict(), out_dir / "state_dict_model.pt")
     with open(out_dir / "out.json", "w") as f:
         json.dump(out, f)
 
+
 def main(args):
     # check data
     data_dir: Path = Path("./data/birds")
-    if(not data_dir.exists()):
+    if not data_dir.exists():
         # get the data from kaggle
-        subprocess.run("kaggle datasets download -d gpiosenka/100-bird-species", shell=True, executable="/bin/bash")
-        subprocess.run("mkdir -p data/birds; unzip -q -d ./data/birds 100-bird-species.zip", shell=True, executable="/bin/bash")
+        subprocess.run(
+            "kaggle datasets download -d gpiosenka/100-bird-species",
+            shell=True,
+            executable="/bin/bash",
+        )
+        subprocess.run(
+            "mkdir -p data/birds; unzip -q -d ./data/birds 100-bird-species.zip",
+            shell=True,
+            executable="/bin/bash",
+        )
 
     # check if we can go over subset of dataset
-    dataloader = DataLoader(BirdDataset(data_dir, image_size=32, subset=1000), batch_size=32, shuffle=True)
+    dataloader = DataLoader(
+        BirdDataset(data_dir, image_size=32, subset=1000), batch_size=32, shuffle=True
+    )
     for _ in tqdm(dataloader):
         pass
 
     # train
-
     model = build_model(image_size=args.image_size)
 
     dataset = BirdDataset(
         data_dir,
         image_size=args.image_size,
-        subset=args.subset # will go over subset of all images
+        subset=args.subset,  # will go over subset of all images
     )
 
     noise_scheduler = DDPMScheduler(
-        num_train_timesteps=args.num_train_timesteps,
-        beta_schedule="squaredcos_cap_v2"
+        num_train_timesteps=args.num_train_timesteps, beta_schedule="squaredcos_cap_v2"
+    )
+
+    # wandb
+    wandb.init(
+        project="ddpm-bird-32px",
+        config=vars(args),
     )
 
     train_losses = fit(
@@ -177,15 +197,16 @@ def main(args):
         dataset,
         noise_scheduler,
         epochs=args.epochs,
-        batch_size=args.bs, # 32px (max bs=256)
+        batch_size=args.bs,  # 32px (max bs=256)
         lr=args.lr,
         num_train_timesteps=args.num_train_timesteps,
-        batch_pg=args.batch_pg
+        batch_pg=args.batch_pg,
     )
 
     # save outputs
     out_dir: Path = Path(args.out_dir)
     save_outs(out_dir, vars(args), model, train_losses)
+
 
 def parse_args():
     parser = argparse.ArgumentParser()
@@ -200,7 +221,11 @@ def parse_args():
     args = parser.parse_args()
     print(f"running with: {vars(args)}")
     return args
-    
+
+
+""" 
+wandb login
+"""
 if __name__ == "__main__":
     args = parse_args()
     main(args)
