@@ -166,3 +166,4 @@ venv/
 .env
 data/
 out/
+wandb

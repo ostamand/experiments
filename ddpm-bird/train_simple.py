@@ -15,6 +15,8 @@ from tqdm import tqdm
 from diffusers import DDPMScheduler, UNet2DModel
 import wandb
 
+from utils import generate_random_samples, generate_image_from_samples
+
 load_dotenv()
 
 
@@ -95,8 +97,12 @@ def fit(
     epochs: int = 1,
     batch_size: int = 64,
     num_train_timesteps: int = 1000,
+    image_size: int = 32,
     lr=4e-4,
     batch_pg=True,
+    out_dir = "out",
+    seed: int = 42,
+    **kwargs
 ):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model.to(device)
@@ -132,9 +138,22 @@ def fit(
             if batch_pg and (batch_i + 1) % log_each_batch == 0:
                 print(f"status: epoch {epoch+1}, batch {batch_i+1}/{len(dataloader)}")
 
+        # log epoch loss
         loss_avg = sum(losses[-len(dataloader) :]) / len(dataloader)
         print(f"done: epoch {epoch+1}, loss {loss_avg}")
-        wandb.log({"loss": loss_avg})
+
+        # generate some images
+        model.eval()
+        samples = generate_random_samples(model, noise_scheduler, n=4, image_size=image_size, seed=seed)
+        img = generate_image_from_samples(samples, resize=image_size*2)
+        img.save(Path(out_dir) / f"sample_{epoch+1}.jpg")
+        model.train()
+
+        wandb.log({
+            "loss": loss_avg,
+            "sample": wandb.Image(img)
+            }
+        )
 
     return losses
 
@@ -151,6 +170,11 @@ def save_outs(
 
 
 def main(args):
+    # make sure output folder exits
+    out_dir = Path(args.out_dir)
+    if not out_dir.exists():
+        os.makedirs(out_dir)
+
     # check data
     data_dir: Path = Path("./data/birds")
     if not data_dir.exists():
@@ -196,15 +220,10 @@ def main(args):
         model,
         dataset,
         noise_scheduler,
-        epochs=args.epochs,
-        batch_size=args.bs,  # 32px (max bs=256)
-        lr=args.lr,
-        num_train_timesteps=args.num_train_timesteps,
-        batch_pg=args.batch_pg,
+        **vars(args)
     )
 
     # save outputs
-    out_dir: Path = Path(args.out_dir)
     save_outs(out_dir, vars(args), model, train_losses)
 
 
@@ -218,13 +237,31 @@ def parse_args():
     parser.add_argument("--out-dir", type=str, default="out")
     parser.add_argument("--num-train-timesteps", type=int, default=1000)
     parser.add_argument("--lr", type=float, default=1e-4)
+    parser.add_argument("--seed", type=int, default=42)
     args = parser.parse_args()
     print(f"running with: {vars(args)}")
     return args
 
 
 """ 
-wandb login
+References:
+
+- BIRDS 525 SPECIES- IMAGE CLASSIFICATION: https://www.kaggle.com/datasets/gpiosenka/100-bird-species
+- https://colab.research.google.com/github/huggingface/diffusion-models-class/blob/main/unit1/01_introduction_to_diffusers.ipynb
+- https://github.com/huggingface/diffusers/blob/main/examples/unconditional_image_generation/train_unconditional.py
+
+Setup:
+
+- wandb login
+
+Examples:
+
+run test training sample: 
+    python ddpm-bird/train_simple.py --epochs 10 --subset 1000 --out out/test
+
+run 5 epochs all data: 
+    python ddpm-bird/train_simple.py --epochs 5 --out out/ddpm-bird/epochs-5
+
 """
 if __name__ == "__main__":
     args = parse_args()
