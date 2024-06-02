@@ -4,13 +4,14 @@ import subprocess
 from pathlib import Path
 import json
 import math
+import logging
 
 import torch
 from torch.utils.data import Dataset, DataLoader
 from torchvision.io import read_image
 from torchvision.transforms import v2
 from torch.optim.lr_scheduler import LambdaLR
-
+from accelerate import Accelerator
 
 from dotenv import load_dotenv
 import pandas as pd
@@ -21,6 +22,7 @@ import wandb
 from utils import generate_random_samples, generate_image_from_samples
 
 load_dotenv()
+logger = logging.getLogger(__name__)
 
 
 # from: https://github.com/huggingface/diffusers/blob/05be622b1c152bf11026f97f083bb1b989231aec/src/diffusers/optimization.py#L154-L185
@@ -114,95 +116,92 @@ class BirdDataset(Dataset):
         return image
 
 
-def build_model(image_size: int = 64, dp: float = 0.):
+def build_model(image_size: int = 64, dp: float = 0.0):
     return UNet2DModel(
-            sample_size=image_size,
-            in_channels=3,
-            out_channels=3,
-            layers_per_block=2,
-            dropout=dp,
-            block_out_channels=(128, 128, 256, 256, 512, 512),
-            down_block_types=(
-                "DownBlock2D",
-                "DownBlock2D",
-                "DownBlock2D",
-                "DownBlock2D",
-                "AttnDownBlock2D",
-                "DownBlock2D",
-            ),
-            up_block_types=(
-                "UpBlock2D",
-                "AttnUpBlock2D",
-                "UpBlock2D",
-                "UpBlock2D",
-                "UpBlock2D",
-                "UpBlock2D",
-            ),
-        )
+        sample_size=image_size,
+        in_channels=3,
+        out_channels=3,
+        layers_per_block=2,
+        dropout=dp,
+        block_out_channels=(128, 128, 256, 256, 512, 512),
+        down_block_types=(
+            "DownBlock2D",
+            "DownBlock2D",
+            "DownBlock2D",
+            "DownBlock2D",
+            "AttnDownBlock2D",
+            "DownBlock2D",
+        ),
+        up_block_types=(
+            "UpBlock2D",
+            "AttnUpBlock2D",
+            "UpBlock2D",
+            "UpBlock2D",
+            "UpBlock2D",
+            "UpBlock2D",
+        ),
+    )
 
 
 def fit(
     model: UNet2DModel,
     dataset: Dataset,
     noise_scheduler: DDPMScheduler,
-    epochs: int = 1,
-    batch_size: int = 64,
-    num_train_timesteps: int = 1000,
-    image_size: int = 32,
-    lr=4e-4,
-    seed: int = 42,
-    batch_pg=True,
-    out_dir="out",
-    **kwargs,
+    args: argparse.Namespace
 ):
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    torch.set_default_device(device)
+    accelerator = Accelerator(mixed_precision=args.mixed_precision, gradient_accumulation_steps=args.gradient_accumulation_steps)
+    device = accelerator.device
     model.to(device)
 
     dataloader = DataLoader(
         dataset,
-        batch_size=batch_size,
+        batch_size=args.batch_size,
         shuffle=True,
-        generator=torch.Generator(device=device),
     )
-    log_each_batch = max(len(dataloader) // 5, 1)
 
-    opt = torch.optim.AdamW(model.parameters(), lr=lr)
+    opt = torch.optim.AdamW(model.parameters(), lr=args.lr)
 
+    steps_per_epoch = int(len(dataloader) / args.gradient_accumulation_steps) #!
     lr_scheduler = get_cosine_schedule_with_warmup(
         opt,
-        num_warmup_steps=int(len(dataloader) * epochs * 0.33), 
-        num_training_steps=(len(dataloader) * epochs),
+        num_warmup_steps=int(steps_per_epoch * args.epochs * 0.33),
+        num_training_steps= steps_per_epoch * args.epochs,
     )
 
     lossf = torch.nn.MSELoss()
-
     losses = []
 
-    model.train()
-    for epoch in range(epochs):
+    model, opt, dataloader, lr_scheduler = accelerator.prepare(
+        model, opt, dataloader, lr_scheduler
+    )
+
+    log_each_batch = max(len(dataloader) // 5, 1)
+    for epoch in range(args.epochs):
         for batch_i, x in enumerate(dataloader):
-            x = x.to(device)
+            with accelerator.accumulate(model):
+                bs = x.shape[0]
 
-            bs = x.shape[0]
+                noise = torch.randn(x.shape).to(device)
+                timesteps = torch.randint(0, args.num_train_timesteps, (bs,)).long().to(device)
 
-            noise = torch.randn(x.shape).to(device)
-            timesteps = torch.randint(0, num_train_timesteps, (bs,)).long().to(device)
+                noisy_images = noise_scheduler.add_noise(x, noise, timesteps)
 
-            noisy_images = noise_scheduler.add_noise(x, noise, timesteps)
+                noise_preds = model(noisy_images, timesteps).sample
 
-            noise_preds = model(noisy_images, timesteps).sample
+                with accelerator.autocast():
+                    loss = lossf(noise_preds, noise)
 
-            loss = lossf(noise_preds, noise)
-            losses.append(loss.item())
+                losses.append(loss.item())
 
-            loss.backward()
-            opt.step()
-            lr_scheduler.step()
-            opt.zero_grad()
+                accelerator.backward(loss)
+                opt.step()
+                lr_scheduler.step()
+                opt.zero_grad()
 
-            if batch_pg and (batch_i + 1) % log_each_batch == 0:
-                print(f"status: epoch {epoch+1}, batch {batch_i+1:.2f}/{len(dataloader)}")
+            if args.batch_pg and (batch_i + 1) % log_each_batch == 0:
+                logger.info(
+                    f"status: epoch {epoch+1}, batch {batch_i+1:.2f}/{len(dataloader)}"
+                )
 
         # log epoch loss
         loss_avg = sum(losses[-len(dataloader) :]) / len(dataloader)
@@ -210,10 +209,10 @@ def fit(
         # generate some images
         model.eval()
         samples = generate_random_samples(
-            model, noise_scheduler, n=4, image_size=image_size, seed=seed, pg=False
+            model, noise_scheduler, n=4, image_size=args.image_size, seed=args.seed, pg=False
         )
         img = generate_image_from_samples(samples)
-        img.save(Path(out_dir) / f"sample_{epoch+1}.jpg")
+        img.save(Path(args.out_dir) / f"sample_{epoch+1}.jpg")
         model.train()
 
         # current lr
@@ -227,7 +226,7 @@ def fit(
             }
         )
 
-        print(f"done: epoch {epoch+1}, loss {loss_avg}, lr {last_lr}")
+        logger.info(f"epoch {epoch+1}, loss {loss_avg}, lr {last_lr}")
 
     return losses
 
@@ -244,6 +243,12 @@ def save_outs(
 
 
 def main(args):
+    logging.basicConfig(
+        format="%(asctime)s - %(levelname)s - %(name)s - %(message)s",
+        datefmt="%m/%d/%Y %H:%M:%S",
+        level=logging.INFO,
+    )
+
     # make sure output folder exits
     out_dir = Path(args.out_dir)
     if not out_dir.exists():
@@ -286,7 +291,7 @@ def main(args):
 
     # populate configs
     config = vars(args)
-    config["train_steps"] = math.ceil(len(dataset) / args.bs) * args.epochs
+    config["train_steps"] = math.ceil(len(dataset) / args.batch_size / args.gradient_accumulation_steps) * args.epochs
 
     # wandb init
     wandb.init(
@@ -295,7 +300,7 @@ def main(args):
     )
 
     # train model
-    train_losses = fit(model, dataset, noise_scheduler, **vars(args))
+    train_losses = fit(model, dataset, noise_scheduler, args)
 
     # save outputs
     save_outs(out_dir, config, model, train_losses)
@@ -304,7 +309,7 @@ def main(args):
 def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument("--epochs", type=int, default=10)
-    parser.add_argument("--bs", type=int, default=256)
+    parser.add_argument("--batch-size", type=int, default=256)
     parser.add_argument("--subset", type=int, default=-1)
     parser.add_argument("--image-size", type=int, default=32)
     parser.add_argument("--batch-pg", action="store_true")
@@ -312,10 +317,13 @@ def parse_args():
     parser.add_argument("--num-train-timesteps", type=int, default=1000)
     parser.add_argument("--lr", type=float, default=4e-4)
     parser.add_argument("--seed", type=int, default=42)
-    parser.add_argument("--dp", type=float, default=0.)
+    parser.add_argument("--dp", type=float, default=0.0)
+    parser.add_argument("--mixed-precision", type=str, default="no")  # fp16
+    parser.add_argument("--gradient-accumulation-steps", type=int, default=1)
     args = parser.parse_args()
-    print(f"running with: {vars(args)}")
+    logger.info(f"running with: {vars(args)}")
     return args
+
 
 """ 
 References:
@@ -330,11 +338,13 @@ References:
         per resolution level and self-attention blocks at the 16 × 16 resolution between the convolutional
         blocks [6]
     - We set the dropout rate on CIFAR10 to 0.1 by sweeping over the values {0.1, 0.2, 0.3, 0.4}.
-    We trained on CelebA-HQ for 0.5M steps, LSUN Bedroom for 2.4M steps, LSUN Cat for 1.8M steps, and LSUN Church for 1.2M steps. The larger LSUN Bedroom model was trained for 1.15M steps.
+    - We trained on CelebA-HQ for 0.5M steps, LSUN Bedroom for 2.4M steps, LSUN Cat for 1.8M steps, and LSUN Church for 1.2M steps. The larger LSUN Bedroom model was trained for 1.15M steps.
     - We used random horizontal flips during training for CIFAR10;
     - We set the learning rate to 2 × 10−4 without any sweeping, and we lowered it to 2 × 10−5 for the 256 × 256 images
     - We set the batch size to 128 for CIFAR10 and 64 for larger images. We did not sweep over these values.
     - We used EMA on model parameters with a decay factor of 0.9999. We did not sweep over this value.
+
+    0.5e6 / 30,000 / 64 = approx. 260 epochs?
 
 Setup:
 
@@ -349,10 +359,13 @@ run 5 epochs, all data:
     python ddpm-bird/train_simple.py --epochs 5 --out out/ddpm-bird/epochs-5
 
 run 30 epochs, all data, 64px
-    python ddpm-bird/train_simple.py --epochs 30 --image-size 64 --b 256 --out out/ddpm-bird/64px-epochs-30 --lr 1e-4
+    python ddpm-bird/train_simple.py --epochs 30 --image-size 64 --batch-size 64 --out out/ddpm-bird/64px-epochs-30 --lr 1e-4
+
+run 30 epochs, all data, 128px
+    python ddpm-bird/train_simple.py --epochs 30 --image-size 128 --batch-size 16 --gradient-accumulation-steps 2 --out out/ddpm-bird/128px-epochs-30 --lr 1e-4
 
 run 30 epochs, all data, 224px
-    python ddpm-bird/train_simple.py --epochs 30 --image-size 224 --b 64 --out out/ddpm-bird/224px-epochs-30 --lr 1e-4
+    python ddpm-bird/train_simple.py --epochs 1 --image-size 224 --batch-size 8 --gradient-accumulation-steps 4 --out out/ddpm-bird/224px-epochs-1 --lr 1e-4
 """
 if __name__ == "__main__":
     args = parse_args()

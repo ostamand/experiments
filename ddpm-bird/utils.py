@@ -18,7 +18,7 @@ def generate_random_samples(
     torch.manual_seed(seed)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     sample = torch.randn(n, 3, image_size, image_size).to(device)
-    for t in tqdm(noise_scheduler.timesteps, disable= not pg):
+    for t in tqdm(noise_scheduler.timesteps, disable=not pg):
         with torch.no_grad():
             residual = model(sample, t).sample
         sample = noise_scheduler.step(residual, t, sample).prev_sample

@@ -1,0 +1,12 @@
+accelerate~=0.30.1
+diffusers~=0.28.0
+pandas
+torch~=2.3.0
+torchvision~=0.18.0
+torchaudio~=2.3.0
+wandb
+tqdm
+ipykernel
+python-dotenv
+matplotlib
+kagglevg
