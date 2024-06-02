@@ -344,8 +344,6 @@ References:
     - We set the batch size to 128 for CIFAR10 and 64 for larger images. We did not sweep over these values.
     - We used EMA on model parameters with a decay factor of 0.9999. We did not sweep over this value.
 
-    0.5e6 / 30,000 / 64 = approx. 260 epochs?
-
 Setup:
 
 - wandb login
