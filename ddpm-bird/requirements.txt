@@ -9,4 +9,4 @@ tqdm
 ipykernel
 python-dotenv
 matplotlib
-kagglevg
+kaggle
