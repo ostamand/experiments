@@ -1,12 +1,12 @@
 name: gabby01
 data_dir: "../data/gabby-2-512px"
-sd_checkpoint_name: "CompVis/stable-diffusion-v1-4"
+sd_checkpoint_name: "runwayml/stable-diffusion-v1-5"
 placeholder_token: "<gabby>"
 initializer_token: "kid"
 evaluation_prompt: "a photo of <gabby>"
 train:
-  lr: 0.02
+  lr: 0.0001
   train_steps: 5000
   bs: 4
   log_each: 500
-  repeats: 25
+  repeats: 10
