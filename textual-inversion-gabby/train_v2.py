@@ -392,12 +392,12 @@ def save(tokenizer, text_encoder, out_dir: Path):
 
 if __name__ == "__main__":
     config = TextualInversionConfig()
-    config.n_vectors = 2
+    config.n_vectors = 8
     config.train_steps = 5000
     config.log_each = 500
     config.lr = 0.005 * config.bs
-    config.out_dir = "./out/vectors4"
-    config.data_dir: str = "./gabby-2-512px"
+    config.out_dir = "./out/gabby1.5-vector8"
+    config.data_dir = "../data/gabby-2-512px"
 
     config.evaluation_prompt = update_prompt_with_tokens(
         config.evaluation_prompt, config.n_vectors

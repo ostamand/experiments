@@ -147,9 +147,12 @@ def fit(
     model: UNet2DModel,
     dataset: Dataset,
     noise_scheduler: DDPMScheduler,
-    args: argparse.Namespace
+    args: argparse.Namespace,
 ):
-    accelerator = Accelerator(mixed_precision=args.mixed_precision, gradient_accumulation_steps=args.gradient_accumulation_steps)
+    accelerator = Accelerator(
+        mixed_precision=args.mixed_precision,
+        gradient_accumulation_steps=args.gradient_accumulation_steps,
+    )
     device = accelerator.device
     model.to(device)
 
@@ -161,11 +164,11 @@ def fit(
 
     opt = torch.optim.AdamW(model.parameters(), lr=args.lr)
 
-    steps_per_epoch = int(len(dataloader) / args.gradient_accumulation_steps) #!
+    steps_per_epoch = int(len(dataloader) / args.gradient_accumulation_steps)  #!
     lr_scheduler = get_cosine_schedule_with_warmup(
         opt,
         num_warmup_steps=int(steps_per_epoch * args.epochs * 0.33),
-        num_training_steps= steps_per_epoch * args.epochs,
+        num_training_steps=steps_per_epoch * args.epochs,
     )
 
     lossf = torch.nn.MSELoss()
@@ -182,7 +185,9 @@ def fit(
                 bs = x.shape[0]
 
                 noise = torch.randn(x.shape).to(device)
-                timesteps = torch.randint(0, args.num_train_timesteps, (bs,)).long().to(device)
+                timesteps = (
+                    torch.randint(0, args.num_train_timesteps, (bs,)).long().to(device)
+                )
 
                 noisy_images = noise_scheduler.add_noise(x, noise, timesteps)
 
@@ -209,7 +214,12 @@ def fit(
         # generate some images
         model.eval()
         samples = generate_random_samples(
-            model, noise_scheduler, n=4, image_size=args.image_size, seed=args.seed, pg=False
+            model,
+            noise_scheduler,
+            n=4,
+            image_size=args.image_size,
+            seed=args.seed,
+            pg=False,
         )
         img = generate_image_from_samples(samples)
         img.save(Path(args.out_dir) / f"sample_{epoch+1}.jpg")
@@ -291,7 +301,10 @@ def main(args):
 
     # populate configs
     config = vars(args)
-    config["train_steps"] = math.ceil(len(dataset) / args.batch_size / args.gradient_accumulation_steps) * args.epochs
+    config["train_steps"] = (
+        math.ceil(len(dataset) / args.batch_size / args.gradient_accumulation_steps)
+        * args.epochs
+    )
 
     # wandb init
     wandb.init(
