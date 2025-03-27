@@ -1,1 +1,0 @@
-# Textual Inversion: Gabby
